@@ -732,17 +732,8 @@ if data_loaded:
 else:
     st.error("❌ Data not loaded. Place your file at: insurance_chatbot/data/insurance_data.csv")
 
-# ── Cloud-compatible data loading ──
-DATA_PATH = "data/insurance_data.csv"
-
-if not os.path.exists(DATA_PATH):
-    st.info("📂 Please upload your insurance CSV file to begin.")
-    uploaded = st.file_uploader("Upload insurance_data.csv", type=["csv"])
-    if uploaded:
-        os.makedirs("data", exist_ok=True)
-        with open(DATA_PATH, "wb") as f:
-            f.write(uploaded.getvalue())
-        st.success("✅ File uploaded successfully! Loading...")
-        st.rerun()
-    else:
-        st.stop()    
+@st.cache_data
+def load_data():
+    df = pd.read_csv("data/insurance_data.csv")
+    df.columns = df.columns.str.strip().str.upper()
+    return df
