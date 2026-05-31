@@ -211,6 +211,94 @@ RULE 9 — For SINGLE VALUE queries (no groupby needed):
     ✅ df[df['VEHICLE_AGE_GROUP'].str.upper().str.contains('10')]
     ✅ df[df['VEHICLE_AGE_GROUP'].str.upper().str.contains('MORE THAN 10|> 10|>10')]
     ❌ df[df['VEHICLE_AGE_GROUP'] == 'MORE THAN 10 YEARS']  ← breaks if value format changes
+
+
+    RULE 13 — For "districts/entities WHERE metric > average/threshold" questions:
+  NEVER use .query() with dynamic string concatenation — it always breaks.
+  Instead use a TWO-STATEMENT approach with semicolon:
+  
+  Statement 1 → calculate the threshold value (average loss ratio)
+  Statement 2 → filter districts above that threshold
+
+  ✅ CORRECT PATTERN:
+  df[(df['FY_YEAR'] == 'FY-2024-25') & (df['CUSTOMER_STATE'].str.upper() == 'MAHARASHTRA')].groupby('CUSTOMER_DISTRICT').apply(lambda x: round(x['OD_CLAIM_AMOUNT'].sum() / x['OD_NET_EARNED_PREMIUM'].sum() * 100, 2)).reset_index().rename(columns={{0: 'OD_LR_%'}}).pipe(lambda t: t[t['OD_LR_%'] > round(df[(df['FY_YEAR'] == 'FY-2024-25') & (df['CUSTOMER_STATE'].str.upper() == 'MAHARASHTRA')]['OD_CLAIM_AMOUNT'].sum() / df[(df['FY_YEAR'] == 'FY-2024-25') & (df['CUSTOMER_STATE'].str.upper() == 'MAHARASHTRA')]['OD_NET_EARNED_PREMIUM'].sum() * 100, 2)]).sort_values('OD_LR_%', ascending=False)
+
+  EXPLANATION OF PATTERN:
+  Step 1 → compute district loss ratios → reset_index → rename column 0
+  Step 2 → use .pipe(lambda t: t[t['OD_LR_%'] > THRESHOLD]) to filter inline
+  Step 3 → THRESHOLD = state average = direct sum calculation on filtered df
+
+  ❌ WRONG — .query() with string + str():
+  .query('OD_LR_% > ' + str(round(...)))
+
+  ❌ WRONG — .query() with f-string:
+  .query(f'OD_LR_% > {{threshold}}')
+
+  RULE 14 — Always name output columns descriptively using rename():
+  When result is a Series (single metric), always rename column 0 to the correct metric name.
+
+  ✅ For OD Premium query:
+  .reset_index().rename(columns={{0: 'OD_PREMIUM'}})
+
+  ✅ For OD Loss Ratio query:
+  .reset_index().rename(columns={{0: 'OD_LR_%'}})
+
+  ✅ For TP Claim Amount query:
+  .reset_index().rename(columns={{0: 'TP_CLAIM_AMOUNT'}})
+
+  ✅ For OD NOP query:
+  .reset_index().rename(columns={{0: 'OD_NOP'}})
+
+  ✅ For OD Frequency query:
+  .reset_index().rename(columns={{0: 'OD_FREQ_%'}})
+
+  RULE: The column name must match what the user asked for — never leave it as 0.
+
+  RULE 15 — For "IMDs/districts WHERE metric > state average" questions:
+  Use SINGLE statement with .pipe() to filter inline — no semicolons needed.
+  
+  ✅ CORRECT PATTERN (single statement, filter using pipe):
+  df[df['CUSTOMER_STATE'].str.upper() == 'UTTAR PRADESH'].groupby('I_IMD_NAME').apply(lambda x: round(x['OD_CLAIM_AMOUNT'].sum() / x['OD_NET_EARNED_PREMIUM'].sum() * 100, 2)).reset_index().rename(columns={{0: 'OD_LR_%'}}).pipe(lambda t: t[t['OD_LR_%'] > round(df[df['CUSTOMER_STATE'].str.upper() == 'UTTAR PRADESH']['OD_CLAIM_AMOUNT'].sum() / df[df['CUSTOMER_STATE'].str.upper() == 'UTTAR PRADESH']['OD_NET_EARNED_PREMIUM'].sum() * 100, 2)]).sort_values('OD_LR_%', ascending=False).head(5)
+
+  STEP BY STEP BREAKDOWN:
+  Step 1 → filter state: df[df['CUSTOMER_STATE'].str.upper() == 'UTTAR PRADESH']
+  Step 2 → group by IMD and calculate loss ratio
+  Step 3 → reset_index and rename column 0 to 'OD_LR_%'
+  Step 4 → .pipe(lambda t: t[t['OD_LR_%'] > STATE_LR]) to filter above state average
+  Step 5 → STATE_LR = direct calculation on same state filter
+  Step 6 → .sort_values('OD_LR_%', ascending=False).head(5)
+
+  ❌ WRONG — multi-statement with variable assignment:
+  state_lr = round(df[...]['OD_CLAIM_AMOUNT'].sum() / df[...]['OD_NET_EARNED_PREMIUM'].sum() * 100, 2); df[...].groupby(...)...
+
+  ❌ WRONG — .query() with string concatenation:
+  .query('OD_LR_% > ' + str(state_lr))
+  
+  ❌ WRONG — any code with = assignment inside eval:
+  state_lr = ...  ← assignment breaks eval()
+
+RULE 16 — NEVER use variable assignment inside pandas_code:
+  eval() cannot execute assignment statements (=).
+  Everything must be a single chained expression.
+  ✅ Use .pipe() for intermediate filtering
+  ✅ Use nested expressions for threshold values
+  ❌ Never: var = value; use_var_here
+
+ RULE 17 — NEVER use % symbol in .assign() column names — Python syntax error:
+  .assign() uses keyword arguments — % is illegal in Python variable names.
+  
+  ❌ WRONG:
+  .assign(STATE_OD_LR_%=round(...))   ← % breaks Python syntax
+
+  ✅ CORRECT — use dict form of assign instead:
+  .assign(**{{'STATE_OD_LR_%': round(...)}})
+
+  ✅ FULL CORRECT EXAMPLE for IMDs above state loss ratio:
+  df[df['CUSTOMER_STATE'].str.upper() == 'UTTAR PRADESH'].groupby('I_IMD_NAME').apply(lambda x: round(x['OD_CLAIM_AMOUNT'].sum() / x['OD_NET_EARNED_PREMIUM'].sum() * 100, 2)).reset_index().rename(columns={{0: 'OD_LR_%'}}).assign(**{{'STATE_OD_LR_%': round(df[df['CUSTOMER_STATE'].str.upper() == 'UTTAR PRADESH']['OD_CLAIM_AMOUNT'].sum() / df[df['CUSTOMER_STATE'].str.upper() == 'UTTAR PRADESH']['OD_NET_EARNED_PREMIUM'].sum() * 100, 2)}}).pipe(lambda t: t[t['OD_LR_%'] > t['STATE_OD_LR_%']]).sort_values('OD_LR_%', ascending=False).head(5)
+
+  KEY PATTERN:
+  .assign(**{{'COLUMN_%': value}})   ← double curly braces because inside f-string
+  
 """
     return prompt
 
@@ -259,14 +347,8 @@ def run_code(code, df):
         if isinstance(res, pd.Series):
             out = res.reset_index()
             out.columns = [str(c) for c in out.columns]
-            # Rename value column "0" based on context
-            new_cols = []
-            for c in out.columns:
-                if c == "0":
-                    new_cols.append("OD_LR_%")
-                else:
-                    new_cols.append(c)
-            out.columns = new_cols
+            # Only rename "0" column — keep name neutral, format_df will handle display
+            out.columns = ["VALUE" if c == "0" else c for c in out.columns]
             # If last column looks like a loss ratio (values 0-300), label it
             last_col = out.columns[-1]
             if last_col == "OD_LR_%":
@@ -366,15 +448,65 @@ def format_df(df_in):
     out.columns = [str(c) for c in out.columns]
     for col in list(out.columns):
         col_up = col.upper()
-        if any(k in col_up for k in ["LOSS_RATIO", "_LR_", "_LR%", "LR_%", "FREQUENCY", "FREQ"]):
+
+        # Format as % ONLY if column name explicitly contains LR or LOSS_RATIO
+        # NOT for generic VALUE column
+        if any(k in col_up for k in ["LOSS_RATIO", "_LR_%", "LR_%", "_LR",
+                                      "FREQUENCY", "FREQ", "STATE_OD", "STATE_TP"]) \
+                and col_up != "VALUE":
             out[col] = pd.to_numeric(out[col], errors="coerce")
-            out[col] = out[col].apply(lambda x: f"{x:.2f}%" if pd.notnull(x) else "-")
+            out[col] = out[col].apply(
+                lambda x: f"{x:.2f}%" if pd.notnull(x) else "-"
+            )
+
+        # Format as Crores if column name has PREMIUM or CLAIM_AMOUNT
         elif any(k in col_up for k in ["PREMIUM", "CLAIM_AMOUNT"]):
             out[col] = pd.to_numeric(out[col], errors="coerce")
-            out[col] = out[col].apply(lambda x: f"₹{x/1e7:.2f} Cr" if pd.notnull(x) else "-")
+            out[col] = out[col].apply(
+                lambda x: f"₹{x/1e7:.2f} Cr" if pd.notnull(x) else "-"
+            )
+
+        # Format counts with commas
         elif any(k in col_up for k in ["_NOP", "_NOC"]):
             out[col] = pd.to_numeric(out[col], errors="coerce")
-            out[col] = out[col].apply(lambda x: f"{int(x):,}" if pd.notnull(x) else "-")
+            out[col] = out[col].apply(
+                lambda x: f"{int(x):,}" if pd.notnull(x) else "-"
+            )
+
+        # VALUE column — detect type from actual data values
+        elif col_up == "VALUE":
+            numeric = pd.to_numeric(out[col], errors="coerce")
+            if numeric.max() > 10000:
+                # Large number → treat as amount → show as Crores
+                out[col] = numeric.apply(
+                    lambda x: f"₹{x/1e7:.2f} Cr" if pd.notnull(x) else "-"
+                )
+            elif numeric.max() <= 300:
+                # Small number → treat as ratio/% → show as %
+                out[col] = numeric.apply(
+                    lambda x: f"{x:.2f}%" if pd.notnull(x) else "-"
+                )
+    # Catch-all: any remaining numeric column with values between 0-500
+        # that hasn't been formatted yet → likely a ratio/% column
+        elif col_up not in ["FY_YEAR", "VALUE"] and \
+             not any(k in col_up for k in ["STATE", "DISTRICT", "IMD", "CHANNEL",
+                                            "VEHICLE", "FUEL", "ZONE", "PIN",
+                                            "SEGMENT", "CATEGORY", "TYPE", "LOB",
+                                            "FLAG", "NAME", "CODE", "GROUP"]):
+            numeric = pd.to_numeric(out[col], errors="coerce")
+            if numeric.notna().any():
+                col_max = numeric.max()
+                col_min = numeric.min()
+                if 0 <= col_min and col_max <= 500:
+                    # Likely a percentage/ratio
+                    out[col] = numeric.apply(
+                        lambda x: f"{x:.2f}%" if pd.notnull(x) else "-"
+                    )
+                elif col_max > 10000:
+                    # Likely an amount
+                    out[col] = numeric.apply(
+                        lambda x: f"₹{x/1e7:.2f} Cr" if pd.notnull(x) else "-"
+                    )
     return out
 
 # ══════════════════════════════════════════════════════
@@ -524,10 +656,10 @@ if data_loaded:
         st.markdown("---")
 
     # ── Data Preview ──
-    with st.expander("👁️ Preview Raw Data (first 5 rows)"):
-        st.write(f"**Shape:** {df.shape[0]:,} rows × {df.shape[1]} columns")
-        st.write(f"**Columns:** {list(df.columns)}")
-        st.dataframe(df.head(5), use_container_width=True)
+    # with st.expander("👁️ Preview Raw Data (first 5 rows)"):
+    #     st.write(f"**Shape:** {df.shape[0]:,} rows × {df.shape[1]} columns")
+    #     st.write(f"**Columns:** {list(df.columns)}")
+    #     st.dataframe(df.head(5), use_container_width=True)
 
     # ── Suggested Questions ──
     st.markdown("**💡 Suggested Questions — click to ask:**")
@@ -563,8 +695,8 @@ if data_loaded:
                 st.dataframe(msg["dataframe"], use_container_width=True)
             if "chart" in msg:
                 st.plotly_chart(msg["chart"], use_container_width=True)
-            if "code" in msg:
-                st.caption(f"🔧 `{msg['code']}`")
+            # if "code" in msg:
+            #     st.caption(f"🔧 `{msg['code']}`")
 
     # ── Chat Input ──
     prefill  = st.session_state.pop("prefill", "")
@@ -585,6 +717,7 @@ if data_loaded:
                     system_prompt = build_system_prompt(df)
                     resp = client.chat.completions.create(
                         model="llama-3.3-70b-versatile",
+                        #model="meta-llama/llama-4-scout-17b-16e-instruct",
                         messages=[
                             {"role": "system", "content": system_prompt},
                             {"role": "user",   "content": question}
@@ -599,7 +732,7 @@ if data_loaded:
                     result      = run_code(pandas_code, df)
 
                     st.markdown(f"**{explanation}**")
-                    st.caption(f"🔧 `{pandas_code}`")
+                    # st.caption(f"🔧 `{pandas_code}`")
 
                     msg_entry = {"role": "assistant", "content": explanation, "code": pandas_code}
 
