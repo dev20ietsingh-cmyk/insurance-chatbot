@@ -309,6 +309,16 @@ RULE 16 — NEVER use variable assignment inside pandas_code:
   ❌ WRONG — groupby column lost:
   df.groupby('V_VEHICLE_TYPE').apply(lambda x: pd.Series({{...}}))  ← missing .reset_index()
 
+  RULE 19 — For "IMDs where loss ratio > their state average" (all states):
+  Use a SINGLE statement with merge + filter — no semicolons needed:
+
+  ✅ CORRECT PATTERN:
+  df.groupby(['CUSTOMER_STATE', 'I_IMD_NAME']).apply(lambda x: pd.Series({{'IMD_OD_LR_%': round(x['OD_CLAIM_AMOUNT'].sum() / x['OD_NET_EARNED_PREMIUM'].sum() * 100, 2)}})).reset_index().merge(df.groupby('CUSTOMER_STATE').apply(lambda x: pd.Series({{'STATE_OD_LR_%': round(x['OD_CLAIM_AMOUNT'].sum() / x['OD_NET_EARNED_PREMIUM'].sum() * 100, 2)}})).reset_index(), on='CUSTOMER_STATE').pipe(lambda t: t[t['IMD_OD_LR_%'] > t['STATE_OD_LR_%']]).sort_values('IMD_OD_LR_%', ascending=False).head(10)
+
+  This returns a single DataFrame with columns:
+  CUSTOMER_STATE | I_IMD_NAME | IMD_OD_LR_% | STATE_OD_LR_%
+  No need for two-step — single merge handles it.
+
 """
     return prompt
 
@@ -770,22 +780,29 @@ if data_loaded:
                             label = item.get("label", f"Result {i+1}")
 
                             if i == 0:
-                                # First result = top entity summary → metric card
                                 st.markdown("---")
-                                try:
-                                    dim_col = next((c for c in data.columns if data[c].dtype == object and c != "FY_YEAR"), None)
-                                    lr_col  = next((c for c in data.columns if "LR" in c.upper() or "LOSS" in c.upper()), None)
-                                    entity  = data.iloc[0][dim_col] if dim_col else "Top Entry"
-                                    lr_val  = pd.to_numeric(data.iloc[0][lr_col], errors="coerce") if lr_col else None
-                                    st.markdown(f"### 🏆 Highest Loss Ratio — {label}")
-                                    m1, m2 = st.columns(2)
-                                    m1.metric(dim_col or "Entity", entity)
-                                    if lr_val:
-                                        m2.metric("OD Loss Ratio", f"{lr_val:.2f}%",
-                                                  delta="⚠️ Highest" if lr_val > 100 else "📊 Tracked")
-                                    st.markdown("---")
-                                except Exception:
+                                # Check if first result has multiple rows → show as table not metric card
+                                if isinstance(data, pd.DataFrame) and len(data) > 1:
+                                    # Multiple rows — show as table directly
+                                    st.markdown(f"#### 📊 {label} Summary")
                                     st.dataframe(format_df(data), use_container_width=True)
+                                    msg_entry["dataframe"] = format_df(data)
+                                else:
+                                    # Single row — show as metric card
+                                    try:
+                                        dim_col = next((c for c in data.columns if data[c].dtype == object and c != "FY_YEAR"), None)
+                                        lr_col  = next((c for c in data.columns if "LR" in c.upper() or "LOSS" in c.upper()), None)
+                                        entity  = data.iloc[0][dim_col] if dim_col else "Top Entry"
+                                        lr_val  = pd.to_numeric(data.iloc[0][lr_col], errors="coerce") if lr_col else None
+                                        st.markdown(f"### 🏆 Highest Loss Ratio — {label}")
+                                        m1, m2 = st.columns(2)
+                                        m1.metric(dim_col or "Entity", entity)
+                                        if lr_val:
+                                            m2.metric("OD Loss Ratio", f"{lr_val:.2f}%",
+                                                      delta="⚠️ Highest" if lr_val > 100 else "📊 Tracked")
+                                    except Exception:
+                                        st.dataframe(format_df(data), use_container_width=True)
+                                st.markdown("---")
 
                             else:
                                 # Second result = drill-down table + chart
