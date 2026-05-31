@@ -298,7 +298,17 @@ RULE 16 — NEVER use variable assignment inside pandas_code:
 
   KEY PATTERN:
   .assign(**{{'COLUMN_%': value}})   ← double curly braces because inside f-string
-  
+
+  RULE 18 — Always include the groupby dimension column in the output:
+  When using groupby + apply returning pd.Series, always call .reset_index()
+  at the end so the groupby column (e.g. V_VEHICLE_TYPE) appears as a column.
+
+  ✅ CORRECT — vehicle type shows as first column:
+  df.groupby('V_VEHICLE_TYPE').apply(lambda x: pd.Series({{'OD_LR_%': round(x['OD_CLAIM_AMOUNT'].sum() / x['OD_NET_EARNED_PREMIUM'].sum() * 100, 2), 'TP_LR_%': round(x['TP_CLAIM_AMOUNT'].sum() / x['TP_NET_EARNED_PREMIUM'].sum() * 100, 2)}})).reset_index()
+
+  ❌ WRONG — groupby column lost:
+  df.groupby('V_VEHICLE_TYPE').apply(lambda x: pd.Series({{...}}))  ← missing .reset_index()
+
 """
     return prompt
 
@@ -375,7 +385,11 @@ def run_code(code, df):
                     str(col[-1]) if isinstance(col, tuple) else str(col)
                     for col in out.columns
                 ]
-            out = out.reset_index(drop=True)
+            # Keep named index as column (groupby dimension)
+            if out.index.name and out.index.name not in out.columns:
+                out = out.reset_index()   # ← keeps groupby column
+            else:
+                out = out.reset_index(drop=True)  # ← drops numeric index only
             out.columns = [str(c) for c in out.columns]
             out.columns = ["LOSS_RATIO_%" if c == "0" else c for c in out.columns]
             # Fix _x/_y merge artifacts
@@ -715,16 +729,29 @@ if data_loaded:
                 raw         = ""
                 try:
                     system_prompt = build_system_prompt(df)
-                    resp = client.chat.completions.create(
-                        model="llama-3.3-70b-versatile",
-                        #model="meta-llama/llama-4-scout-17b-16e-instruct",
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user",   "content": question}
-                        ],
-                        temperature=0,
-                        max_tokens=600
-                    )
+                    MODELS = ["meta-llama/llama-4-scout-17b-16e-instruct", "llama-3.1-8b-instant", "openai/gpt-oss-20b"]
+                    resp = None
+                    last_error = None
+                    for model_name in MODELS:
+                        try:
+                            resp = client.chat.completions.create(
+                                model=model_name,
+                                messages=[
+                                    {"role": "system", "content": system_prompt},
+                                    {"role": "user",   "content": question}
+                                ],
+                                temperature=0,
+                                max_tokens=600
+                            )
+                            break
+                        except Exception as e:
+                            last_error = e
+                            if "rate_limit" in str(e).lower() or "429" in str(e):
+                                continue
+                            else:
+                                raise e
+                    if resp is None:
+                        raise Exception(f"All models rate limited. Try again in 10 min.")
                     raw         = resp.choices[0].message.content.strip()
                     parsed      = parse_groq_response(raw)
                     pandas_code = parsed.get("pandas_code", "")
@@ -793,6 +820,7 @@ if data_loaded:
                                         msg_entry["chart"] = fig
                                 except Exception:
                                     pass
+                        st.session_state.messages.append(msg_entry)  # ← save CASE 1
 
                     # ── CASE 2: Single DataFrame ──
                     elif isinstance(result, pd.DataFrame):
@@ -823,8 +851,8 @@ if data_loaded:
                                 msg_entry["chart"] = fig
                         except Exception:
                             pass
+                        st.session_state.messages.append(msg_entry)  # ← save CASE 2
 
-                    # ── CASE 3: Scalar ──
                     # ── CASE 3: Scalar ──
                     else:
                         # Format nicely based on likely type
@@ -864,9 +892,3 @@ if data_loaded:
 
 else:
     st.error("❌ Data not loaded. Place your file at: insurance_chatbot/data/insurance_data.csv")
-
-@st.cache_data
-def load_data():
-    df = pd.read_csv("data/insurance_data.csv")
-    df.columns = df.columns.str.strip().str.upper()
-    return df
